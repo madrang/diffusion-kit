@@ -736,12 +736,12 @@ class UNet(DDPM):
                 x0_noisy = x0
                 x_dec = x0_noisy* mask + (1. - mask) * x_dec
 
-            x_dec = self.p_sample_ddim(x_dec, cond, ts, index=index, use_original_steps=use_original_steps,
+            x_dec, pred_x0 = self.p_sample_ddim(x_dec, cond, ts, index=index, use_original_steps=use_original_steps,
                                           unconditional_guidance_scale=unconditional_guidance_scale,
                                           unconditional_conditioning=unconditional_conditioning)
 
             if callback: callback(i)
-            if img_callback: img_callback(x_dec, i)
+            if img_callback: img_callback(pred_x0, i)
         
         if mask is not None:
             return x0 * mask + (1. - mask) * x_dec
@@ -788,7 +788,7 @@ class UNet(DDPM):
         if noise_dropout > 0.:
             noise = torch.nn.functional.dropout(noise, p=noise_dropout)
         x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
-        return x_prev
+        return x_prev, pred_x0
 
 
     @torch.no_grad()
