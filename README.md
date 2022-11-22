@@ -1,4 +1,6 @@
-Reusable kit containing various models commonly required for a Stable Diffusion project. This is a community project, feel free to contribute (and use in your project)!
+Reusable kit containing various models commonly required for a Stable Diffusion project.
+
+This is a community project, feel free to contribute (and use in your project)!
 
 Work-in-progress
 
