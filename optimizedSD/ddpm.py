@@ -22,7 +22,7 @@ from ldm.util import exists, default, instantiate_from_config
 from ldm.modules.diffusionmodules.util import make_beta_schedule
 from ldm.modules.diffusionmodules.util import make_ddim_sampling_parameters, make_ddim_timesteps, noise_like
 from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_tensor, noise_like
-from samplers import CompVisDenoiser, get_ancestral_step, to_d, append_dims,linear_multistep_coeff
+from .samplers import CompVisDenoiser, get_ancestral_step, to_d, append_dims,linear_multistep_coeff
 
 def disabled_train(self):
     """Overwrite model.train with this function to make sure train/eval mode
@@ -506,6 +506,8 @@ class UNet(DDPM):
 
         x_latent = noise if x0 is None else x0
         # sampling
+        if sampler in ('ddim', 'dpm2', 'heun', 'dpm2_a', 'lms') and not hasattr(self, 'ddim_timesteps'):
+            self.make_schedule(ddim_num_steps=S, ddim_eta=eta, verbose=False)
         
         if sampler == "plms":
             self.make_schedule(ddim_num_steps=S, ddim_eta=eta, verbose=False)
@@ -528,32 +530,39 @@ class UNet(DDPM):
         elif sampler == "ddim":
             samples = self.ddim_sampling(x_latent, conditioning, S, unconditional_guidance_scale=unconditional_guidance_scale,
                                          unconditional_conditioning=unconditional_conditioning,
-                                         mask = mask,init_latent=x_T,use_original_steps=False)
+                                         mask = mask,init_latent=x_T,use_original_steps=False,
+                                         callback=callback, img_callback=img_callback)
 
         elif sampler == "euler":
             self.make_schedule(ddim_num_steps=S, ddim_eta=eta, verbose=False)
             samples = self.euler_sampling(self.alphas_cumprod,x_latent, S, conditioning, unconditional_conditioning=unconditional_conditioning,
-                                        unconditional_guidance_scale=unconditional_guidance_scale)
+                                        unconditional_guidance_scale=unconditional_guidance_scale,
+                                        callback=callback, img_callback=img_callback)
         elif sampler == "euler_a":
             self.make_schedule(ddim_num_steps=S, ddim_eta=eta, verbose=False)
             samples = self.euler_ancestral_sampling(self.alphas_cumprod,x_latent, S, conditioning, unconditional_conditioning=unconditional_conditioning,
-                                        unconditional_guidance_scale=unconditional_guidance_scale)
+                                        unconditional_guidance_scale=unconditional_guidance_scale,
+                                        callback=callback, img_callback=img_callback)
 
         elif sampler == "dpm2":
             samples = self.dpm_2_sampling(self.alphas_cumprod,x_latent, S, conditioning, unconditional_conditioning=unconditional_conditioning,
-                                        unconditional_guidance_scale=unconditional_guidance_scale)
+                                        unconditional_guidance_scale=unconditional_guidance_scale,
+                                        callback=callback, img_callback=img_callback)
         elif sampler == "heun":
             samples = self.heun_sampling(self.alphas_cumprod,x_latent, S, conditioning, unconditional_conditioning=unconditional_conditioning,
-                                        unconditional_guidance_scale=unconditional_guidance_scale)
+                                        unconditional_guidance_scale=unconditional_guidance_scale,
+                                        callback=callback, img_callback=img_callback)
 
         elif sampler == "dpm2_a":
             samples = self.dpm_2_ancestral_sampling(self.alphas_cumprod,x_latent, S, conditioning, unconditional_conditioning=unconditional_conditioning,
-                                        unconditional_guidance_scale=unconditional_guidance_scale)
+                                        unconditional_guidance_scale=unconditional_guidance_scale,
+                                        callback=callback, img_callback=img_callback)
 
 
         elif sampler == "lms":
             samples = self.lms_sampling(self.alphas_cumprod,x_latent, S, conditioning, unconditional_conditioning=unconditional_conditioning,
-                                        unconditional_guidance_scale=unconditional_guidance_scale)
+                                        unconditional_guidance_scale=unconditional_guidance_scale,
+                                        callback=callback, img_callback=img_callback)
 
         if(self.turbo):
             self.model1.to("cpu")
@@ -706,7 +715,8 @@ class UNet(DDPM):
 
     @torch.no_grad()
     def ddim_sampling(self, x_latent, cond, t_start, unconditional_guidance_scale=1.0, unconditional_conditioning=None,
-               mask = None,init_latent=None,use_original_steps=False):
+               mask = None,init_latent=None,use_original_steps=False,
+               callback=None, img_callback=None):
 
         timesteps = self.ddim_timesteps
         timesteps = timesteps[:t_start]
@@ -729,6 +739,9 @@ class UNet(DDPM):
             x_dec = self.p_sample_ddim(x_dec, cond, ts, index=index, use_original_steps=use_original_steps,
                                           unconditional_guidance_scale=unconditional_guidance_scale,
                                           unconditional_conditioning=unconditional_conditioning)
+
+            if callback: callback(i)
+            if img_callback: img_callback(x_dec, i)
         
         if mask is not None:
             return x0 * mask + (1. - mask) * x_dec
@@ -779,7 +792,7 @@ class UNet(DDPM):
 
 
     @torch.no_grad()
-    def euler_sampling(self, ac, x, S, cond, unconditional_conditioning = None, unconditional_guidance_scale = 1,extra_args=None,callback=None, disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.):
+    def euler_sampling(self, ac, x, S, cond, unconditional_conditioning = None, unconditional_guidance_scale = 1,extra_args=None,callback=None, disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1., img_callback=None):
         """Implements Algorithm 2 (Euler steps) from Karras et al. (2022)."""
         extra_args = {} if extra_args is None else extra_args
         cvd = CompVisDenoiser(ac)
@@ -805,15 +818,15 @@ class UNet(DDPM):
 
 
             d = to_d(x, sigma_hat, denoised)
-            if callback is not None:
-                callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigma_hat, 'denoised': denoised})
+            if callback: callback(i)
+            if img_callback: img_callback(x, i)
             dt = sigmas[i + 1] - sigma_hat
             # Euler method
             x = x + d * dt
         return x
 
     @torch.no_grad()
-    def euler_ancestral_sampling(self,ac,x, S, cond, unconditional_conditioning = None, unconditional_guidance_scale = 1,extra_args=None, callback=None, disable=None):
+    def euler_ancestral_sampling(self,ac,x, S, cond, unconditional_conditioning = None, unconditional_guidance_scale = 1,extra_args=None, callback=None, disable=None, img_callback=None):
         """Ancestral sampling with Euler method steps."""
         extra_args = {} if extra_args is None else extra_args
 
@@ -835,8 +848,8 @@ class UNet(DDPM):
             denoised = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
 
             sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1])
-            if callback is not None:
-                callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
+            if callback: callback(i)
+            if img_callback: img_callback(x, i)
             d = to_d(x, sigmas[i], denoised)
             # Euler method
             dt = sigma_down - sigmas[i]
@@ -847,7 +860,7 @@ class UNet(DDPM):
 
 
     @torch.no_grad()
-    def heun_sampling(self, ac, x, S, cond, unconditional_conditioning = None, unconditional_guidance_scale = 1, extra_args=None, callback=None, disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.):
+    def heun_sampling(self, ac, x, S, cond, unconditional_conditioning = None, unconditional_guidance_scale = 1, extra_args=None, callback=None, disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1., img_callback=None):
         """Implements Algorithm 2 (Heun steps) from Karras et al. (2022)."""
         extra_args = {} if extra_args is None else extra_args
 
@@ -874,8 +887,8 @@ class UNet(DDPM):
             denoised = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
 
             d = to_d(x, sigma_hat, denoised)
-            if callback is not None:
-                callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigma_hat, 'denoised': denoised})
+            if callback: callback(i)
+            if img_callback: img_callback(x, i)
             dt = sigmas[i + 1] - sigma_hat
             if sigmas[i + 1] == 0:
                 # Euler method
@@ -899,7 +912,7 @@ class UNet(DDPM):
 
 
     @torch.no_grad()
-    def dpm_2_sampling(self,ac,x, S, cond, unconditional_conditioning = None, unconditional_guidance_scale = 1,extra_args=None, callback=None, disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.):
+    def dpm_2_sampling(self,ac,x, S, cond, unconditional_conditioning = None, unconditional_guidance_scale = 1,extra_args=None, callback=None, disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1., img_callback=None):
         """A sampler inspired by DPM-Solver-2 and Algorithm 2 from Karras et al. (2022)."""
         extra_args = {} if extra_args is None else extra_args
 
@@ -924,7 +937,8 @@ class UNet(DDPM):
             e_t_uncond, e_t = (x_in  + eps * c_out).chunk(2)
             denoised = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
 
-
+            if callback: callback(i)
+            if img_callback: img_callback(x, i)
             
             d = to_d(x, sigma_hat, denoised)
             # Midpoint method, where the midpoint is chosen according to a rho=3 Karras schedule
@@ -949,7 +963,7 @@ class UNet(DDPM):
 
 
     @torch.no_grad()
-    def dpm_2_ancestral_sampling(self,ac,x, S, cond, unconditional_conditioning = None, unconditional_guidance_scale = 1, extra_args=None, callback=None, disable=None):
+    def dpm_2_ancestral_sampling(self,ac,x, S, cond, unconditional_conditioning = None, unconditional_guidance_scale = 1, extra_args=None, callback=None, disable=None, img_callback=None):
         """Ancestral sampling with DPM-Solver inspired second-order steps."""
         extra_args = {} if extra_args is None else extra_args
 
@@ -971,8 +985,8 @@ class UNet(DDPM):
 
 
             sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1])
-            if callback is not None:
-                callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
+            if callback: callback(i)
+            if img_callback: img_callback(x, i)
             d = to_d(x, sigmas[i], denoised)
             # Midpoint method, where the midpoint is chosen according to a rho=3 Karras schedule
             sigma_mid = ((sigmas[i] ** (1 / 3) + sigma_down ** (1 / 3)) / 2) ** 3
@@ -997,7 +1011,7 @@ class UNet(DDPM):
 
 
     @torch.no_grad()
-    def lms_sampling(self,ac,x, S, cond, unconditional_conditioning = None, unconditional_guidance_scale = 1, extra_args=None, callback=None, disable=None, order=4):
+    def lms_sampling(self,ac,x, S, cond, unconditional_conditioning = None, unconditional_guidance_scale = 1, extra_args=None, callback=None, disable=None, order=4, img_callback=None):
         extra_args = {} if extra_args is None else extra_args
         s_in = x.new_ones([x.shape[0]])
 
@@ -1017,6 +1031,8 @@ class UNet(DDPM):
             e_t_uncond, e_t = (x_in  + eps * c_out).chunk(2)
             denoised = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
 
+            if callback: callback(i)
+            if img_callback: img_callback(x, i)
 
             d = to_d(x, sigmas[i], denoised)
             ds.append(d)
