@@ -9,6 +9,7 @@ dependencies:
   - pytorch=1.11.0
   - torchvision=0.12.0
   - numpy=1.20.3
+  - antlr4-python3-runtime=4.8
   - pip:
     - albumentations==0.4.3
     - opencv-python==4.1.2.30
@@ -23,7 +24,11 @@ dependencies:
     - torch-fidelity==0.3.0
     - transformers==4.19.2
     - torchmetrics==0.6.0
+    - pywavelets==1.3.0
+    - pandas==1.4.4
     - kornia==0.6
     - -e git+https://github.com/CompVis/taming-transformers.git@master#egg=taming-transformers
     - -e git+https://github.com/openai/CLIP.git@main#egg=clip
+    - -e git+https://github.com/TencentARC/GFPGAN#egg=GFPGAN
+    - -e git+https://github.com/xinntao/Real-ESRGAN#egg=realesrgan
     - -e .
