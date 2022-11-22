@@ -799,6 +799,8 @@ class UNet(DDPM):
         sigmas = cvd.get_sigmas(S)
         x = x*sigmas[0]
 
+        print(f"Running Euler Sampling with {len(sigmas) - 1} timesteps")
+
         s_in = x.new_ones([x.shape[0]]).half()
         for i in trange(len(sigmas) - 1, disable=disable):
             gamma = min(s_churn / (len(sigmas) - 1), 2 ** 0.5 - 1) if s_tmin <= sigmas[i] <= s_tmax else 0.
@@ -835,6 +837,8 @@ class UNet(DDPM):
         sigmas = cvd.get_sigmas(S)
         x = x*sigmas[0]
 
+        print(f"Running Euler Ancestral Sampling with {len(sigmas) - 1} timesteps")
+
         s_in = x.new_ones([x.shape[0]]).half()
         for i in trange(len(sigmas) - 1, disable=disable):
 
@@ -868,6 +872,7 @@ class UNet(DDPM):
         sigmas = cvd.get_sigmas(S)
         x = x*sigmas[0]
 
+        print(f"Running Heun Sampling with {len(sigmas) - 1} timesteps")
 
         s_in = x.new_ones([x.shape[0]]).half()
         for i in trange(len(sigmas) - 1, disable=disable):
@@ -920,6 +925,8 @@ class UNet(DDPM):
         sigmas = cvd.get_sigmas(S)
         x = x*sigmas[0]
 
+        print(f"Running DPM2 Sampling with {len(sigmas) - 1} timesteps")
+
         s_in = x.new_ones([x.shape[0]]).half()
         for i in trange(len(sigmas) - 1, disable=disable):
             gamma = min(s_churn / (len(sigmas) - 1), 2 ** 0.5 - 1) if s_tmin <= sigmas[i] <= s_tmax else 0.
@@ -971,6 +978,8 @@ class UNet(DDPM):
         sigmas = cvd.get_sigmas(S)
         x = x*sigmas[0]
 
+        print(f"Running DPM2 Ancestral Sampling with {len(sigmas) - 1} timesteps")
+
         s_in = x.new_ones([x.shape[0]]).half()
         for i in trange(len(sigmas) - 1, disable=disable):
 
@@ -1018,6 +1027,8 @@ class UNet(DDPM):
         cvd = CompVisDenoiser(ac)
         sigmas = cvd.get_sigmas(S)
         x = x*sigmas[0]
+
+        print(f"Running LMS Sampling with {len(sigmas) - 1} timesteps")
 
         ds = []
         for i in trange(len(sigmas) - 1, disable=disable):
