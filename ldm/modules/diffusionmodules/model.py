@@ -2,12 +2,19 @@
 import math
 import torch
 import torch.nn as nn
-from torch.nn.functional import silu
 import numpy as np
 from einops import rearrange
+from typing import Optional, Any
 
-from ldm.util import instantiate_from_config
-from ldm.modules.attention import LinearAttention
+from ldm.modules.attention import MemoryEfficientCrossAttention
+
+try:
+    import xformers
+    import xformers.ops
+    XFORMERS_IS_AVAILBLE = True
+except:
+    XFORMERS_IS_AVAILBLE = False
+    print("No module 'xformers'. Proceeding without it.")
 
 
 def get_timestep_embedding(timesteps, embedding_dim):
@@ -29,6 +36,11 @@ def get_timestep_embedding(timesteps, embedding_dim):
     if embedding_dim % 2 == 1:  # zero pad
         emb = torch.nn.functional.pad(emb, (0,1,0,0))
     return emb
+
+
+def nonlinearity(x):
+    # swish
+    return x*torch.sigmoid(x)
 
 
 def Normalize(in_channels, num_groups=32):
@@ -117,14 +129,14 @@ class ResnetBlock(nn.Module):
     def forward(self, x, temb):
         h = x
         h = self.norm1(h)
-        h = silu(h)
+        h = nonlinearity(h)
         h = self.conv1(h)
 
         if temb is not None:
-            h = h + self.temb_proj(silu(temb))[:,:,None,None]
+            h = h + self.temb_proj(nonlinearity(temb))[:,:,None,None]
 
         h = self.norm2(h)
-        h = silu(h)
+        h = nonlinearity(h)
         h = self.dropout(h)
         h = self.conv2(h)
 
@@ -135,12 +147,6 @@ class ResnetBlock(nn.Module):
                 x = self.nin_shortcut(x)
 
         return x+h
-
-
-class LinAttnBlock(LinearAttention):
-    """to match AttnBlock usage"""
-    def __init__(self, in_channels):
-        super().__init__(dim=in_channels, heads=1, dim_head=in_channels)
 
 
 class AttnBlock(nn.Module):
@@ -170,7 +176,6 @@ class AttnBlock(nn.Module):
                                         stride=1,
                                         padding=0)
 
-
     def forward(self, x):
         h_ = x
         h_ = self.norm(h_)
@@ -197,16 +202,99 @@ class AttnBlock(nn.Module):
 
         return x+h_
 
+class MemoryEfficientAttnBlock(nn.Module):
+    """
+        Uses xformers efficient implementation,
+        see https://github.com/MatthieuTPHR/diffusers/blob/d80b531ff8060ec1ea982b65a1b8df70f73aa67c/src/diffusers/models/attention.py#L223
+        Note: this is a single-head self-attention operation
+    """
+    #
+    def __init__(self, in_channels):
+        super().__init__()
+        self.in_channels = in_channels
 
-def make_attn(in_channels, attn_type="vanilla"):
-    assert attn_type in ["vanilla", "linear", "none"], f'attn_type {attn_type} unknown'
+        self.norm = Normalize(in_channels)
+        self.q = torch.nn.Conv2d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.k = torch.nn.Conv2d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.v = torch.nn.Conv2d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.proj_out = torch.nn.Conv2d(in_channels,
+                                        in_channels,
+                                        kernel_size=1,
+                                        stride=1,
+                                        padding=0)
+        self.attention_op: Optional[Any] = None
+
+    def forward(self, x):
+        h_ = x
+        h_ = self.norm(h_)
+        q = self.q(h_)
+        k = self.k(h_)
+        v = self.v(h_)
+
+        # compute attention
+        B, C, H, W = q.shape
+        q, k, v = map(lambda x: rearrange(x, 'b c h w -> b (h w) c'), (q, k, v))
+
+        q, k, v = map(
+            lambda t: t.unsqueeze(3)
+            .reshape(B, t.shape[1], 1, C)
+            .permute(0, 2, 1, 3)
+            .reshape(B * 1, t.shape[1], C)
+            .contiguous(),
+            (q, k, v),
+        )
+        out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=None, op=self.attention_op)
+
+        out = (
+            out.unsqueeze(0)
+            .reshape(B, 1, out.shape[1], C)
+            .permute(0, 2, 1, 3)
+            .reshape(B, out.shape[1], C)
+        )
+        out = rearrange(out, 'b (h w) c -> b c h w', b=B, h=H, w=W, c=C)
+        out = self.proj_out(out)
+        return x+out
+
+
+class MemoryEfficientCrossAttentionWrapper(MemoryEfficientCrossAttention):
+    def forward(self, x, context=None, mask=None):
+        b, c, h, w = x.shape
+        x = rearrange(x, 'b c h w -> b (h w) c')
+        out = super().forward(x, context=context, mask=mask)
+        out = rearrange(out, 'b (h w) c -> b c h w', h=h, w=w, c=c)
+        return x + out
+
+
+def make_attn(in_channels, attn_type="vanilla", attn_kwargs=None):
+    assert attn_type in ["vanilla", "vanilla-xformers", "memory-efficient-cross-attn", "linear", "none"], f'attn_type {attn_type} unknown'
+    if XFORMERS_IS_AVAILBLE and attn_type == "vanilla":
+        attn_type = "vanilla-xformers"
     print(f"making attention of type '{attn_type}' with {in_channels} in_channels")
     if attn_type == "vanilla":
+        assert attn_kwargs is None
         return AttnBlock(in_channels)
+    elif attn_type == "vanilla-xformers":
+        print(f"building MemoryEfficientAttnBlock with {in_channels} in_channels...")
+        return MemoryEfficientAttnBlock(in_channels)
+    elif type == "memory-efficient-cross-attn":
+        attn_kwargs["query_dim"] = in_channels
+        return MemoryEfficientCrossAttentionWrapper(**attn_kwargs)
     elif attn_type == "none":
         return nn.Identity(in_channels)
     else:
-        return LinAttnBlock(in_channels)
+        raise NotImplementedError()
 
 
 class Model(nn.Module):
@@ -319,7 +407,7 @@ class Model(nn.Module):
             assert t is not None
             temb = get_timestep_embedding(t, self.ch)
             temb = self.temb.dense[0](temb)
-            temb = silu(temb)
+            temb = nonlinearity(temb)
             temb = self.temb.dense[1](temb)
         else:
             temb = None
@@ -353,7 +441,7 @@ class Model(nn.Module):
 
         # end
         h = self.norm_out(h)
-        h = silu(h)
+        h = nonlinearity(h)
         h = self.conv_out(h)
         return h
 
@@ -450,7 +538,7 @@ class Encoder(nn.Module):
 
         # end
         h = self.norm_out(h)
-        h = silu(h)
+        h = nonlinearity(h)
         h = self.conv_out(h)
         return h
 
@@ -557,7 +645,7 @@ class Decoder(nn.Module):
             return h
 
         h = self.norm_out(h)
-        h = silu(h)
+        h = nonlinearity(h)
         h = self.conv_out(h)
         if self.tanh_out:
             h = torch.tanh(h)
@@ -595,7 +683,7 @@ class SimpleDecoder(nn.Module):
                 x = layer(x)
 
         h = self.norm_out(x)
-        h = silu(h)
+        h = nonlinearity(h)
         x = self.conv_out(h)
         return x
 
@@ -643,7 +731,7 @@ class UpsampleDecoder(nn.Module):
             if i_level != self.num_resolutions - 1:
                 h = self.upsample_blocks[k](h)
         h = self.norm_out(h)
-        h = silu(h)
+        h = nonlinearity(h)
         h = self.conv_out(h)
         return h
 
@@ -762,70 +850,3 @@ class Resize(nn.Module):
         else:
             x = torch.nn.functional.interpolate(x, mode=self.mode, align_corners=False, scale_factor=scale_factor)
         return x
-
-class FirstStagePostProcessor(nn.Module):
-
-    def __init__(self, ch_mult:list, in_channels,
-                 pretrained_model:nn.Module=None,
-                 reshape=False,
-                 n_channels=None,
-                 dropout=0.,
-                 pretrained_config=None):
-        super().__init__()
-        if pretrained_config is None:
-            assert pretrained_model is not None, 'Either "pretrained_model" or "pretrained_config" must not be None'
-            self.pretrained_model = pretrained_model
-        else:
-            assert pretrained_config is not None, 'Either "pretrained_model" or "pretrained_config" must not be None'
-            self.instantiate_pretrained(pretrained_config)
-
-        self.do_reshape = reshape
-
-        if n_channels is None:
-            n_channels = self.pretrained_model.encoder.ch
-
-        self.proj_norm = Normalize(in_channels,num_groups=in_channels//2)
-        self.proj = nn.Conv2d(in_channels,n_channels,kernel_size=3,
-                            stride=1,padding=1)
-
-        blocks = []
-        downs = []
-        ch_in = n_channels
-        for m in ch_mult:
-            blocks.append(ResnetBlock(in_channels=ch_in,out_channels=m*n_channels,dropout=dropout))
-            ch_in = m * n_channels
-            downs.append(Downsample(ch_in, with_conv=False))
-
-        self.model = nn.ModuleList(blocks)
-        self.downsampler = nn.ModuleList(downs)
-
-
-    def instantiate_pretrained(self, config):
-        model = instantiate_from_config(config)
-        self.pretrained_model = model.eval()
-        # self.pretrained_model.train = False
-        for param in self.pretrained_model.parameters():
-            param.requires_grad = False
-
-
-    @torch.no_grad()
-    def encode_with_pretrained(self,x):
-        c = self.pretrained_model.encode(x)
-        if isinstance(c, DiagonalGaussianDistribution):
-            c = c.mode()
-        return  c
-
-    def forward(self,x):
-        z_fs = self.encode_with_pretrained(x)
-        z = self.proj_norm(z_fs)
-        z = self.proj(z)
-        z = silu(z)
-
-        for submodel, downmodel in zip(self.model,self.downsampler):
-            z = submodel(z,temb=None)
-            z = downmodel(z)
-
-        if self.do_reshape:
-            z = rearrange(z,'b c h w -> b (h w) c')
-        return z
-
