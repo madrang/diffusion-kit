@@ -8,17 +8,16 @@ from typing import Optional, Any
 
 from ldm.modules.diffusionmodules.util import checkpoint
 
+# CrossAttn precision handling
+import os
+_ATTN_PRECISION = os.environ.get("ATTN_PRECISION", "fp32")
 
 try:
     import xformers
     import xformers.ops
-    XFORMERS_IS_AVAILBLE = True
+    XFORMERS_IS_AVAILBLE = os.environ.get("ATTN_XFORMERS", "enabled") == "enabled"
 except:
     XFORMERS_IS_AVAILBLE = False
-
-# CrossAttn precision handling
-import os
-_ATTN_PRECISION = os.environ.get("ATTN_PRECISION", "fp32")
 
 def exists(val):
     return val is not None
